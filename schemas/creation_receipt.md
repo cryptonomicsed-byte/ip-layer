@@ -22,6 +22,8 @@ Emitted on every significant creative output. Nostr **regular event**, kind `190
     ["attest", "<attestation-event-id>"],    // repeatable, populated as attestations arrive
     ["osovm_op", "RECEIPT", "<osovm-receipt-id>"], // present when this event IS the Nostr
                                                     // publication of an OSOVM RECEIPT opcode emission
+    ["twin", "<twin-binding-event-id>"],     // optional: present when this receipt is a 1:1-twin
+                                              // state snapshot, see twin_binding.md
     ["e", "<parent-creation-receipt-id>", "", "root"] // optional: derivative-work lineage
   ],
   "content": "{\"title\":\"...\",\"description\":\"...\"}",
@@ -65,6 +67,17 @@ OSOVM's internal receipt id for cross-reference/replay). For actions that never 
 simply absent and the event stands alone as a plain Creation Receipt. One schema serves both cases —
 there should never be two separate receipt records for the same action.
 
+**Verified against real code** (see `docs/verification-pass-1.md`): OSOVM's `op_receipt` (opcode
+`0x1f`, `src/vm_core.jl`) takes a single `{hash}` argument and returns `{receipt, verified}`, where
+`verified` is only a length check (`>= 64` chars). The `<osovm-receipt-id>` in the `osovm_op` tag
+should be OSOVM's own `receipt_id` string (produced by `make_receipt_id`), and the Creation Receipt's
+`x` tag hash is the same value passed as `op_receipt`'s `hash` argument — so the unification is real,
+not cosmetic. Note the claim strength: `op_receipt`'s `verified` is a shallow format check only. A
+stronger "this was actually witnessed" claim comes from Zàngbétò's separate quorum system
+(`ZangbetoReceipt`/`ReceiptBundle`, 7-of-12 witness quorum, `src/zangbeto_receipts.jl`) — a Creation
+Receipt should not imply Zàngbétò-level verification just because `osovm_op` is present; that would
+need its own explicit tag if/when wired up.
+
 ## Open questions (ask before implementing)
 
 1. Exact authorization rule for "which pubkeys may emit receipts under a given IP Root" — needs a
@@ -73,6 +86,4 @@ there should never be two separate receipt records for the same action.
 2. Should `split` basis-points be validated/enforced anywhere in v1, or purely advisory metadata for
    downstream zap-splitting tools to read? (`split` entries are consumed by NIP-57 zap-splitting
    today; NIP-60/61 Cashu is a future alternative settlement path, same tag shape.)
-3. OSOVM's actual RECEIPT opcode payload shape isn't in hand yet — `osovm_op` tag above is a
-   placeholder guess at the cross-reference shape. Needs a direct look at OSOVM's opcode definition
-   before this is locked, to make sure the unification is real and not just cosmetic.
+3. ~~OSOVM's actual RECEIPT opcode payload shape~~ — **resolved**, see `docs/verification-pass-1.md`.
