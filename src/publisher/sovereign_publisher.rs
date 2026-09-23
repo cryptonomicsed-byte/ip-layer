@@ -163,6 +163,139 @@ pub async fn publish_scene_receipt(
     Ok(event_id)
 }
 
+// ── Agent-birth kind publishers (1901 / 1902) ────────────────────────────────
+
+/// Publish a kind-1901 Creation Receipt at agent birth.
+///
+/// `agent_id`    — DID or UUID that identifies the agent being born.
+/// `nostr_pubkey` — the agent's Nostr pubkey (hex, 32 bytes).
+/// `relay_url`   — Nostr relay to publish to (e.g. `wss://relay.damus.io`).
+///
+/// Returns `Ok(event_id)` — 32-byte hex string — on success.
+/// Falls back to a deterministic stub id if no private key is available or
+/// the relay is unreachable (same pattern as the other publish helpers above).
+pub async fn publish_creation_receipt(
+    agent_id: &str,
+    nostr_pubkey: &str,
+    relay_url: &str,
+) -> Result<String, String> {
+    let content = serde_json::json!({
+        "agent_id": agent_id,
+        "event": "agent_born",
+    })
+    .to_string();
+
+    let tags = vec![
+        vec!["p".into(), nostr_pubkey.into()],
+        vec!["agent_id".into(), agent_id.into()],
+        vec!["kind_label".into(), "creation_receipt".into()],
+        vec!["L".into(), "license".into()],
+        vec!["l".into(), "cc-by-4.0".into(), "license".into()],
+    ];
+
+    let created_at = unix_now_secs();
+    let stub_id = stub_event_id(agent_id, relay_url);
+
+    // Try real NIP-01 sign if AGENT_NSEC env var is set.
+    if let Ok(nsec) = std::env::var("AGENT_NSEC") {
+        if let Ok(seckey) = ip_layer::nostr::NostrSecretKey::from_hex(&nsec) {
+            match ip_layer::nostr::sign_event(1901, tags, content, &seckey, created_at) {
+                Ok(event) => {
+                    let event_id = event.id.clone();
+                    match publish_nostr_event(relay_url, &event).await {
+                        Ok(()) => {
+                            info!(
+                                event_id   = %event_id,
+                                agent_id   = %agent_id,
+                                relay_url  = %relay_url,
+                                kind       = 1901,
+                                "kind-1901 CreationReceipt published to Nostr"
+                            );
+                        }
+                        Err(e) => warn!(error = %e, "kind-1901 relay delivery failed — using stub id"),
+                    }
+                    return Ok(event_id);
+                }
+                Err(e) => warn!(error = %e, "kind-1901 sign failed — using stub id"),
+            }
+        }
+    }
+
+    info!(
+        event_id  = %stub_id,
+        agent_id  = %agent_id,
+        relay_url = %relay_url,
+        kind      = 1901,
+        "kind-1901 CreationReceipt stub-published (no AGENT_NSEC)"
+    );
+    Ok(stub_id)
+}
+
+/// Publish a kind-1902 Attestation at agent birth.
+///
+/// `agent_id`        — DID or UUID of the agent to attest.
+/// `attestation_data` — JSON string carrying the attestation payload (stance,
+///                       reason, weight, etc.) — stored verbatim in event content.
+/// `relay_url`       — Nostr relay to publish to.
+///
+/// Returns `Ok(event_id)` — 32-byte hex string — on success.
+pub async fn publish_attestation(
+    agent_id: &str,
+    attestation_data: &str,
+    relay_url: &str,
+) -> Result<String, String> {
+    // Validate that attestation_data is valid JSON; fall back to wrapping it if not.
+    let content = if serde_json::from_str::<serde_json::Value>(attestation_data).is_ok() {
+        attestation_data.to_string()
+    } else {
+        serde_json::json!({ "notes": attestation_data }).to_string()
+    };
+
+    let tags = vec![
+        vec!["agent_id".into(), agent_id.into()],
+        vec!["stance".into(), "vouch".into()],
+        vec!["kind_label".into(), "attestation".into()],
+        vec!["L".into(), "attestation".into()],
+        vec!["l".into(), "vouch".into(), "attestation".into()],
+    ];
+
+    let created_at = unix_now_secs();
+    let stub_id = stub_event_id(agent_id, relay_url);
+
+    if let Ok(nsec) = std::env::var("AGENT_NSEC") {
+        if let Ok(seckey) = ip_layer::nostr::NostrSecretKey::from_hex(&nsec) {
+            match ip_layer::nostr::sign_event(1902, tags, content, &seckey, created_at) {
+                Ok(event) => {
+                    let event_id = event.id.clone();
+                    match publish_nostr_event(relay_url, &event).await {
+                        Ok(()) => {
+                            info!(
+                                event_id   = %event_id,
+                                agent_id   = %agent_id,
+                                relay_url  = %relay_url,
+                                kind       = 1902,
+                                "kind-1902 Attestation published to Nostr"
+                            );
+                        }
+                        Err(e) => warn!(error = %e, "kind-1902 relay delivery failed — using stub id"),
+                    }
+                    return Ok(event_id);
+                }
+                Err(e) => warn!(error = %e, "kind-1902 sign failed — using stub id"),
+            }
+        }
+    }
+
+    info!(
+        event_id  = %stub_id,
+        agent_id  = %agent_id,
+        relay_url = %relay_url,
+        kind      = 1902,
+        "kind-1902 Attestation stub-published (no AGENT_NSEC)"
+    );
+    Ok(stub_id)
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -267,5 +400,65 @@ mod tests {
         let id1 = publish_capture_receipt(&receipt, "wss://relay.test", "key1").await.unwrap();
         let id2 = publish_capture_receipt(&receipt, "wss://relay.test", "key2").await.unwrap();
         assert_eq!(id1, id2, "event_id should be deterministic (derived from receipt+relay, not private key)");
+    }
+
+    // ── kind-1901 / kind-1902 tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn publish_creation_receipt_returns_ok_nonempty_hex() {
+        let result = publish_creation_receipt(
+            "did:agent:test-001",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "wss://relay.test",
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let event_id = result.unwrap();
+        assert!(!event_id.is_empty(), "event_id must be non-empty");
+        assert!(
+            event_id.chars().all(|c| c.is_ascii_hexdigit()),
+            "event_id must be hex: {event_id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_attestation_returns_ok_nonempty_hex() {
+        let result = publish_attestation(
+            "did:agent:test-001",
+            r#"{"stance":"vouch","notes":"test attestation"}"#,
+            "wss://relay.test",
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        let event_id = result.unwrap();
+        assert!(!event_id.is_empty(), "event_id must be non-empty");
+        assert!(
+            event_id.chars().all(|c| c.is_ascii_hexdigit()),
+            "event_id must be hex: {event_id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_attestation_accepts_non_json_data() {
+        // Should wrap non-JSON in a {"notes": ...} object without panicking.
+        let result = publish_attestation(
+            "did:agent:test-002",
+            "plain text attestation",
+            "wss://relay.test",
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok even for non-JSON input, got: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn creation_receipt_and_attestation_same_agent_same_relay_deterministic() {
+        // Same agent + relay should produce the same stub id regardless of call order.
+        let id1 = publish_creation_receipt("did:agent:x", "pubkey_hex", "wss://relay.test")
+            .await
+            .unwrap();
+        let id2 = publish_creation_receipt("did:agent:x", "pubkey_hex_2", "wss://relay.test")
+            .await
+            .unwrap();
+        assert_eq!(id1, id2, "stub id must be deterministic (derived from agent_id+relay)");
     }
 }
